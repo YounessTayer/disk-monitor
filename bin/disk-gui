@@ -13,30 +13,33 @@ from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QTabWidget, QFrame, QLabel, QProgressBar, QPushButton, QSplitter,
     QTableWidget, QTableWidgetItem, QHeaderView, QTextEdit, QSpinBox,
-    QGroupBox, QScrollArea, QSizePolicy, QSpacerItem,
+    QGroupBox, QSizePolicy,
 )
 from PyQt5.QtCore import Qt, QTimer, QProcess, pyqtSignal
-from PyQt5.QtGui import QFont, QColor
+from PyQt5.QtGui import QFont, QColor, QPalette
+from PyQt5.QtWidgets import QGraphicsDropShadowEffect
 
 import matplotlib
 matplotlib.use('Qt5Agg')
-import matplotlib.pyplot as plt
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 
-# ─── Color palette ───────────────────────────────────────────────────────────
-BG    = '#0d0d10'
-CARD  = '#1c1c20'
-INSET = '#111113'
+# ─── Palette ──────────────────────────────────────────────────────────────────
+BG    = '#1e1e1e'
+CARD  = '#292929'
+CARD2 = '#242424'
+INSET = '#212121'
 BLUE  = '#3b82f6'
 GREEN = '#22c55e'
 AMBER = '#f59e0b'
 RED   = '#ef4444'
 TEAL  = '#14b8a6'
-GRAY  = '#6b7280'
-TEXT  = '#e5e7eb'
-SUB   = '#9ca3af'
-DIM   = '#4b5563'
+GRAY  = '#8a8a8a'
+TEXT  = '#f0f0f0'
+SUB   = '#b0b0b0'
+DIM   = '#707070'
+
+CHART_COLORS = [TEAL, BLUE, GREEN, AMBER, RED, '#f472b6', '#a78bfa', '#34d399', '#60a5fa']
 
 # ─── Paths ────────────────────────────────────────────────────────────────────
 DB_PATH     = Path.home() / '.local/share/disk-monitor/stats.db'
@@ -44,7 +47,28 @@ CLEANER     = str(Path.home() / '.local/bin/disk-cleaner')
 CONFIG_PATH = Path.home() / '.config/disk-monitor/config.sh'
 
 
-# ─── Database helpers ─────────────────────────────────────────────────────────
+# ─── Helpers ──────────────────────────────────────────────────────────────────
+def fmt_size(kb):
+    """Format KB value to human-readable string."""
+    if kb is None:
+        return '—'
+    kb = float(kb)
+    if kb >= 1_048_576:
+        return f'{kb / 1_048_576:.1f} GB'
+    if kb >= 1024:
+        return f'{kb / 1024:.0f} MB'
+    return f'{kb:.0f} KB'
+
+def trigger_color(trigger):
+    t = str(trigger or '').lower()
+    if 'critical'  in t: return RED
+    if 'threshold' in t: return AMBER
+    if 'scheduled' in t or 'cron' in t: return TEAL
+    if 'manual'    in t: return BLUE
+    return GRAY
+
+
+# ─── Database ─────────────────────────────────────────────────────────────────
 def get_conn():
     if not DB_PATH.exists():
         return None
@@ -55,23 +79,18 @@ def get_conn():
     except Exception:
         return None
 
-
 def db_fetch(sql, params=()):
     conn = get_conn()
     if conn is None:
         return []
     try:
-        cur = conn.execute(sql, params)
-        rows = cur.fetchall()
+        rows = conn.execute(sql, params).fetchall()
         conn.close()
         return rows
     except Exception:
-        try:
-            conn.close()
-        except Exception:
-            pass
+        try: conn.close()
+        except Exception: pass
         return []
-
 
 def db_one(sql, params=()):
     rows = db_fetch(sql, params)
@@ -86,24 +105,25 @@ class StatCard(QFrame):
         self.setObjectName('statCard')
         self.setStyleSheet(f'''
             #statCard {{
-                background:{CARD};
-                border:1px solid rgba(255,255,255,0.08);
-                border-radius:10px;
+                background: {CARD};
+                border: 1px solid rgba(255,255,255,0.07);
+                border-radius: 10px;
             }}
         ''')
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.setMinimumHeight(100)
+        self.setMinimumHeight(104)
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(16, 14, 16, 14)
-        layout.setSpacing(4)
+        layout.setContentsMargins(18, 14, 16, 14)
+        layout.setSpacing(5)
 
-        # Top row: label + dot
+        # Label row
         top = QHBoxLayout()
+        top.setSpacing(6)
         lbl = QLabel(label.upper())
-        lbl.setStyleSheet(f'color:{DIM};font-size:10px;font-weight:600;letter-spacing:0.06em;')
+        lbl.setStyleSheet(f'color:{DIM}; font-size:10px; font-weight:700; letter-spacing:0.08em;')
         dot = QLabel('●')
-        dot.setStyleSheet(f'color:{color};font-size:10px;')
+        dot.setStyleSheet(f'color:{color}; font-size:9px;')
         top.addWidget(lbl)
         top.addStretch()
         top.addWidget(dot)
@@ -111,26 +131,20 @@ class StatCard(QFrame):
 
         # Value
         self._val_lbl = QLabel(str(value))
-        self._val_lbl.setStyleSheet(f'color:{TEXT};font-size:22px;font-weight:700;')
+        self._val_lbl.setStyleSheet(f'color:{color}; font-size:24px; font-weight:700;')
         layout.addWidget(self._val_lbl)
 
-        # Sub
-        if sub:
-            sub_lbl = QLabel(sub)
-            sub_lbl.setStyleSheet(f'color:{DIM};font-size:11px;')
-            layout.addWidget(sub_lbl)
+        # Sub-label
         self._sub_lbl = QLabel(sub)
-        self._sub_lbl.setStyleSheet(f'color:{DIM};font-size:11px;')
-        if not sub:
-            self._sub_lbl.hide()
-        elif sub:
-            layout.addWidget(self._sub_lbl)
+        self._sub_lbl.setStyleSheet(f'color:{SUB}; font-size:11px;')
+        self._sub_lbl.setVisible(bool(sub))
+        layout.addWidget(self._sub_lbl)
 
     def set_value(self, value, sub=None):
         self._val_lbl.setText(str(value))
         if sub is not None:
             self._sub_lbl.setText(sub)
-            self._sub_lbl.show()
+            self._sub_lbl.setVisible(bool(sub))
 
 
 # ─── UsageBar ─────────────────────────────────────────────────────────────────
@@ -138,84 +152,82 @@ class UsageBar(QWidget):
     def __init__(self, partition, parent=None):
         super().__init__(parent)
         self._partition = partition
+        self.setMinimumWidth(240)
+
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(8)
+        layout.setSpacing(10)
 
-        self._lbl = QLabel(partition)
-        self._lbl.setFixedWidth(50)
-        self._lbl.setStyleSheet(f'color:{SUB};font-family:monospace;font-size:11px;')
-        layout.addWidget(self._lbl)
+        lbl = QLabel(partition)
+        lbl.setFixedWidth(44)
+        lbl.setStyleSheet(f'color:{SUB}; font-family:monospace; font-size:11px; font-weight:600;')
+        layout.addWidget(lbl)
 
         self._bar = QProgressBar()
         self._bar.setTextVisible(False)
-        self._bar.setFixedHeight(10)
+        self._bar.setFixedHeight(8)
         self._bar.setRange(0, 100)
         layout.addWidget(self._bar, 1)
 
+        self._pct_lbl = QLabel('—%')
+        self._pct_lbl.setFixedWidth(34)
+        self._pct_lbl.setStyleSheet(f'color:{TEXT}; font-size:11px; font-weight:700;')
+        layout.addWidget(self._pct_lbl)
+
         self._text = QLabel('— / —')
-        self._text.setStyleSheet(f'color:{SUB};font-size:11px;font-family:monospace;')
-        self._text.setFixedWidth(130)
+        self._text.setStyleSheet(f'color:{DIM}; font-size:10px; font-family:monospace;')
+        self._text.setFixedWidth(100)
         layout.addWidget(self._text)
 
         self.refresh()
 
     def refresh(self):
         try:
-            usage = shutil.disk_usage(self._partition)
-            pct = int(usage.used / usage.total * 100)
-            used_g = usage.used / (1024 ** 3)
-            total_g = usage.total / (1024 ** 3)
+            u = shutil.disk_usage(self._partition)
+            pct = int(u.used / u.total * 100)
             color = GREEN if pct < 70 else BLUE if pct < 85 else AMBER if pct < 92 else RED
             self._bar.setValue(pct)
             self._bar.setStyleSheet(f'''
-                QProgressBar {{
-                    background:{INSET};
-                    border:none;
-                    border-radius:5px;
-                }}
-                QProgressBar::chunk {{
-                    background:{color};
-                    border-radius:5px;
-                }}
+                QProgressBar {{ background:{INSET}; border:none; border-radius:4px; }}
+                QProgressBar::chunk {{ background:{color}; border-radius:4px; }}
             ''')
-            self._text.setText(f'{used_g:.1f}G / {total_g:.1f}G')
+            self._pct_lbl.setText(f'{pct}%')
+            self._pct_lbl.setStyleSheet(f'color:{color}; font-size:11px; font-weight:700;')
+            self._text.setText(f'{u.used/1024**3:.1f}G / {u.total/1024**3:.1f}G')
         except Exception:
             self._bar.setValue(0)
+            self._pct_lbl.setText('—%')
             self._text.setText('N/A')
 
 
-# ─── Chart (FigureCanvas wrapper) ─────────────────────────────────────────────
+# ─── Chart ────────────────────────────────────────────────────────────────────
 class Chart(FigureCanvas):
     def __init__(self, figsize=(6, 3), parent=None):
-        self._fig = Figure(figsize=figsize, facecolor=INSET)
+        self._fig = Figure(figsize=figsize, facecolor=CARD)
         super().__init__(self._fig)
         self.setParent(parent)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self._ax = self._fig.add_subplot(111)
-        self._style_ax()
+        self._style_ax(self._ax)
 
-    def _style_ax(self):
-        ax = self._ax
+    def _style_ax(self, ax):
         ax.set_facecolor(INSET)
-        ax.tick_params(colors=DIM, labelsize=9)
+        ax.tick_params(colors=DIM, labelsize=9, length=3)
         for spine in ax.spines.values():
-            spine.set_edgecolor('#1a1a1f')
-        ax.grid(color='#1f2937', linestyle='--', alpha=0.5)
+            spine.set_edgecolor('#333333')
+        ax.grid(color='#333333', linestyle='--', linewidth=0.8, alpha=0.8)
 
     def clear(self):
         self._fig.clear()
         self._ax = self._fig.add_subplot(111)
-        self._style_ax()
+        self._style_ax(self._ax)
 
     def no_data(self, msg='No data — run disk-cleaner first'):
         self.clear()
-        self._ax.text(
-            0.5, 0.5, msg,
+        self._ax.text(0.5, 0.5, msg,
             transform=self._ax.transAxes,
             ha='center', va='center',
-            color=DIM, fontsize=11
-        )
+            color=DIM, fontsize=11, style='italic')
         self._ax.set_xticks([])
         self._ax.set_yticks([])
         self.draw()
@@ -225,239 +237,291 @@ class Chart(FigureCanvas):
 class DashboardTab(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(16, 16, 16, 16)
-        layout.setSpacing(12)
+        root = QVBoxLayout(self)
+        root.setContentsMargins(20, 20, 20, 20)
+        root.setSpacing(16)
 
-        # Stat cards row
+        # Stat cards
         cards_row = QHBoxLayout()
-        cards_row.setSpacing(10)
-        self._card_freed  = StatCard('Total Freed',   '—',   'all time',  TEAL)
-        self._card_runs   = StatCard('Cleanups Run',  '0',   '',          BLUE)
-        self._card_last   = StatCard('Last Cleanup',  '—',   '',          GREEN)
-        self._card_avg    = StatCard('Avg per Run',   '—',   '',          AMBER)
+        cards_row.setSpacing(12)
+        self._card_freed = StatCard('Total Freed',  '—', 'all time', TEAL)
+        self._card_runs  = StatCard('Cleanups Run', '0', '',         BLUE)
+        self._card_last  = StatCard('Last Cleanup', '—', '',         GREEN)
+        self._card_avg   = StatCard('Avg per Run',  '—', '',         AMBER)
         for c in (self._card_freed, self._card_runs, self._card_last, self._card_avg):
             cards_row.addWidget(c)
-        layout.addLayout(cards_row)
+        root.addLayout(cards_row)
 
         # Charts row
         charts_row = QHBoxLayout()
-        charts_row.setSpacing(10)
+        charts_row.setSpacing(12)
 
-        # Donut chart frame
-        donut_frame = QFrame()
-        donut_frame.setStyleSheet(f'background:{CARD};border:1px solid rgba(255,255,255,0.08);border-radius:10px;')
-        donut_layout = QVBoxLayout(donut_frame)
-        donut_layout.setContentsMargins(12, 12, 12, 12)
-        ttl = QLabel('Freed by Cache Type (all time)')
-        ttl.setStyleSheet(f'color:{SUB};font-size:11px;font-weight:600;')
-        donut_layout.addWidget(ttl)
-        self._donut = Chart(figsize=(5, 3.5))
-        donut_layout.addWidget(self._donut)
+        # Donut frame
+        donut_frame = self._card_frame('Freed by Cache Type  —  all time')
+        self._donut = Chart(figsize=(5, 2.8))
+        donut_frame.layout().addWidget(self._donut)
+        # Qt legend — 2-column grid of colored dot + text items
+        self._legend_widget = QWidget()
+        self._legend_widget.setStyleSheet('background:transparent;')
+        from PyQt5.QtWidgets import QGridLayout
+        self._legend_grid = QGridLayout(self._legend_widget)
+        self._legend_grid.setContentsMargins(4, 0, 4, 4)
+        self._legend_grid.setHorizontalSpacing(16)
+        self._legend_grid.setVerticalSpacing(4)
+        donut_frame.layout().addWidget(self._legend_widget)
         charts_row.addWidget(donut_frame, 3)
 
-        # Recent cleanups table frame
-        recent_frame = QFrame()
-        recent_frame.setStyleSheet(f'background:{CARD};border:1px solid rgba(255,255,255,0.08);border-radius:10px;')
-        recent_layout = QVBoxLayout(recent_frame)
-        recent_layout.setContentsMargins(12, 12, 12, 12)
-        ttl2 = QLabel('Recent Cleanups')
-        ttl2.setStyleSheet(f'color:{SUB};font-size:11px;font-weight:600;')
-        recent_layout.addWidget(ttl2)
-        self._recent_tbl = QTableWidget(0, 3)
-        self._recent_tbl.setHorizontalHeaderLabels(['Time', 'Trigger', 'Freed'])
-        self._recent_tbl.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
-        self._recent_tbl.setEditTriggers(QTableWidget.NoEditTriggers)
-        self._recent_tbl.setSelectionMode(QTableWidget.NoSelection)
-        self._recent_tbl.verticalHeader().setVisible(False)
-        recent_layout.addWidget(self._recent_tbl)
+        # Recent table frame
+        recent_frame = self._card_frame('Recent Cleanups')
+        self._recent_tbl = self._make_table(['Time', 'Trigger', 'Freed'])
+        recent_frame.layout().addWidget(self._recent_tbl)
         charts_row.addWidget(recent_frame, 2)
 
-        layout.addLayout(charts_row)
+        root.addLayout(charts_row)
+
+    def _card_frame(self, title):
+        frame = QFrame()
+        frame.setStyleSheet(f'''
+            QFrame {{
+                background:{CARD};
+                border:1px solid rgba(255,255,255,0.07);
+                border-radius:10px;
+            }}
+        ''')
+        lay = QVBoxLayout(frame)
+        lay.setContentsMargins(16, 14, 16, 14)
+        lay.setSpacing(10)
+        lbl = QLabel(title)
+        lbl.setStyleSheet(f'color:{SUB}; font-size:11px; font-weight:700; letter-spacing:0.04em;')
+        lay.addWidget(lbl)
+        sep = QFrame()
+        sep.setFrameShape(QFrame.HLine)
+        sep.setStyleSheet('background:rgba(255,255,255,0.06); max-height:1px;')
+        lay.addWidget(sep)
+        return frame
+
+    def _make_table(self, headers):
+        tbl = QTableWidget(0, len(headers))
+        tbl.setHorizontalHeaderLabels(headers)
+        tbl.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        tbl.setEditTriggers(QTableWidget.NoEditTriggers)
+        tbl.setSelectionMode(QTableWidget.NoSelection)
+        tbl.verticalHeader().setVisible(False)
+        tbl.setShowGrid(False)
+        return tbl
 
     def refresh(self):
-        # Stats
-        total_row = db_one('SELECT SUM(total_freed) as tot, COUNT(*) as cnt FROM cleanups')
-        if total_row and total_row['cnt']:
-            tot_mb = (total_row['tot'] or 0) / 1024
-            cnt = total_row['cnt']
-            avg_mb = tot_mb / cnt if cnt else 0
-            self._card_freed.set_value(f'{tot_mb:.1f} MB')
-            self._card_runs.set_value(str(cnt))
-            self._card_avg.set_value(f'{avg_mb:.1f} MB')
-        else:
-            self._card_freed.set_value('0 MB')
-            self._card_runs.set_value('0')
-            self._card_avg.set_value('—')
+        row = db_one('SELECT SUM(total_freed) as tot, COUNT(*) as cnt FROM cleanups')
+        tot_kb = float(row['tot'] or 0) if row else 0
+        cnt    = int(row['cnt'] or 0)   if row else 0
+        avg_kb = tot_kb / cnt if cnt else 0
 
-        last_row = db_one('SELECT ts FROM cleanups ORDER BY ts DESC LIMIT 1')
-        if last_row:
+        self._card_freed.set_value(fmt_size(tot_kb))
+        self._card_runs.set_value(str(cnt))
+        self._card_avg.set_value(fmt_size(avg_kb))
+
+        last = db_one('SELECT ts FROM cleanups ORDER BY ts DESC LIMIT 1')
+        if last:
             try:
-                dt = datetime.fromisoformat(last_row['ts'])
-                self._card_last.set_value(dt.strftime('%m/%d %H:%M'))
+                dt = datetime.fromisoformat(last['ts'])
+                self._card_last.set_value(dt.strftime('%b %d'), dt.strftime('%H:%M'))
             except Exception:
-                self._card_last.set_value(str(last_row['ts'])[:16])
+                self._card_last.set_value(str(last['ts'])[:10])
         else:
             self._card_last.set_value('Never')
 
-        # Donut chart
+        # Donut
         rows = db_fetch(
-            'SELECT name, SUM(freed_kb) as total FROM actions WHERE status="ok" GROUP BY name ORDER BY total DESC'
+            'SELECT name, SUM(freed_kb) as tot FROM actions '
+            'WHERE status="ok" AND freed_kb>0 GROUP BY name ORDER BY tot DESC'
         )
         self._donut.clear()
+        ax = self._donut._ax
+
+        # Clear Qt legend grid
+        while self._legend_grid.count():
+            item = self._legend_grid.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
         if rows:
-            names = [r['name'] for r in rows]
-            values = [r['total'] for r in rows]
-            colors = [TEAL, BLUE, GREEN, AMBER, RED, GRAY, SUB, DIM,
-                      '#a78bfa', '#f472b6', '#34d399', '#60a5fa'][:len(names)]
-            wedges, _ = self._donut._ax.pie(
-                values,
-                labels=None,
-                colors=colors,
-                startangle=90,
-                wedgeprops=dict(width=0.5, edgecolor=INSET, linewidth=2),
+            names  = [r['name'].replace('_', ' ').title() for r in rows]
+            values = [float(r['tot']) for r in rows]
+            total  = sum(values)
+            colors = CHART_COLORS[:len(names)]
+
+            # Draw donut — no legend inside matplotlib
+            ax.pie(
+                values, labels=None, colors=colors, startangle=90,
+                wedgeprops=dict(width=0.52, edgecolor=INSET, linewidth=2),
             )
-            # Legend
-            self._donut._ax.legend(
-                wedges,
-                [f'{n} ({v/1024:.1f}M)' for n, v in zip(names, values)],
-                loc='center left',
-                bbox_to_anchor=(0.85, 0.5),
-                fontsize=7,
-                framealpha=0,
-                labelcolor=SUB,
-            )
-            self._donut._fig.tight_layout()
+            self._donut._fig.subplots_adjust(left=0.02, right=0.98, top=0.97, bottom=0.03)
             self._donut.draw()
+
+            # Build native Qt legend — 2 columns
+            for i, (name, val, color) in enumerate(zip(names, values, colors)):
+                dot = QLabel('●')
+                dot.setStyleSheet(f'color:{color}; font-size:10px; background:transparent;')
+                dot.setFixedWidth(14)
+                text = QLabel(f'<span style="color:{color};">{name}</span>  <span style="color:{SUB};">{fmt_size(val)}</span>  <span style="color:{DIM};">({val/total*100:.0f}%)</span>')
+                text.setStyleSheet(f'font-size:10px; background:transparent;')
+                text.setTextFormat(Qt.RichText)
+                row, col_base = divmod(i, 2)
+                self._legend_grid.addWidget(dot,  row, col_base * 2)
+                self._legend_grid.addWidget(text, row, col_base * 2 + 1)
         else:
             self._donut.no_data()
 
-        # Recent cleanups table
-        recent = db_fetch('SELECT ts, trigger, total_freed FROM cleanups ORDER BY ts DESC LIMIT 8')
+        # Recent table
+        recent = db_fetch(
+            'SELECT ts, trigger, total_freed FROM cleanups ORDER BY ts DESC LIMIT 8'
+        )
         self._recent_tbl.setRowCount(len(recent))
         for i, r in enumerate(recent):
             try:
                 dt = datetime.fromisoformat(r['ts'])
-                ts_str = dt.strftime('%m/%d %H:%M')
+                ts_str = dt.strftime('%b %d  %H:%M')
             except Exception:
                 ts_str = str(r['ts'])[:16]
-            freed_mb = (r['total_freed'] or 0) / 1024
-            self._recent_tbl.setItem(i, 0, QTableWidgetItem(ts_str))
-            self._recent_tbl.setItem(i, 1, QTableWidgetItem(str(r['trigger'] or '')))
-            self._recent_tbl.setItem(i, 2, QTableWidgetItem(f'{freed_mb:.1f} MB'))
-            for col in range(3):
-                item = self._recent_tbl.item(i, col)
-                if item:
-                    item.setForeground(QColor(TEXT))
+            trig = str(r['trigger'] or '')
+            freed = fmt_size(float(r['total_freed'] or 0))
+
+            items = [
+                (ts_str,  TEXT),
+                (trig,    trigger_color(trig)),
+                (freed,   GREEN if float(r['total_freed'] or 0) > 0 else DIM),
+            ]
+            for col, (text, color) in enumerate(items):
+                item = QTableWidgetItem(text)
+                item.setForeground(QColor(color))
+                self._recent_tbl.setItem(i, col, item)
+        self._recent_tbl.resizeRowsToContents()
 
 
 # ─── Tab 2: History ───────────────────────────────────────────────────────────
 class HistoryTab(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(16, 16, 16, 16)
+        root = QVBoxLayout(self)
+        root.setContentsMargins(20, 20, 20, 20)
 
         splitter = QSplitter(Qt.Vertical)
+        splitter.setChildrenCollapsible(False)
 
-        # Top: cleanups table
-        top_widget = QWidget()
-        top_layout = QVBoxLayout(top_widget)
-        top_layout.setContentsMargins(0, 0, 0, 0)
-        top_lbl = QLabel('All Cleanups')
-        top_lbl.setStyleSheet(f'color:{SUB};font-size:11px;font-weight:600;margin-bottom:4px;')
-        top_layout.addWidget(top_lbl)
+        # Top — all cleanups
+        top = QWidget()
+        tl = QVBoxLayout(top)
+        tl.setContentsMargins(0, 0, 0, 0)
+        tl.setSpacing(8)
+        ttl = QLabel('All Cleanups')
+        ttl.setStyleSheet(f'color:{SUB}; font-size:11px; font-weight:700; letter-spacing:0.04em;')
+        tl.addWidget(ttl)
         self._cleanups_tbl = QTableWidget(0, 4)
-        self._cleanups_tbl.setHorizontalHeaderLabels(['Timestamp', 'Trigger', 'Freed', '/home Δ'])
-        self._cleanups_tbl.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self._cleanups_tbl.setHorizontalHeaderLabels(['Timestamp', 'Trigger', 'Freed', '/home Saved'])
+        hdr = self._cleanups_tbl.horizontalHeader()
+        hdr.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        hdr.setSectionResizeMode(1, QHeaderView.Stretch)
+        hdr.setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        hdr.setSectionResizeMode(3, QHeaderView.ResizeToContents)
         self._cleanups_tbl.setEditTriggers(QTableWidget.NoEditTriggers)
         self._cleanups_tbl.setSelectionMode(QTableWidget.SingleSelection)
         self._cleanups_tbl.setSelectionBehavior(QTableWidget.SelectRows)
         self._cleanups_tbl.verticalHeader().setVisible(False)
+        self._cleanups_tbl.setShowGrid(False)
         self._cleanups_tbl.selectionModel().selectionChanged.connect(self._on_select)
-        top_layout.addWidget(self._cleanups_tbl)
-        splitter.addWidget(top_widget)
+        tl.addWidget(self._cleanups_tbl)
+        splitter.addWidget(top)
 
-        # Bottom: per-cleaner breakdown
-        bottom_widget = QWidget()
-        bottom_layout = QVBoxLayout(bottom_widget)
-        bottom_layout.setContentsMargins(0, 0, 0, 0)
-        bottom_lbl = QLabel('Cleaner Breakdown')
-        bottom_lbl.setStyleSheet(f'color:{SUB};font-size:11px;font-weight:600;margin-bottom:4px;')
-        bottom_layout.addWidget(bottom_lbl)
+        # Bottom — per-cleaner breakdown
+        bot = QWidget()
+        bl = QVBoxLayout(bot)
+        bl.setContentsMargins(0, 8, 0, 0)
+        bl.setSpacing(8)
+        ttl2 = QLabel('Cleaner Breakdown')
+        ttl2.setStyleSheet(f'color:{SUB}; font-size:11px; font-weight:700; letter-spacing:0.04em;')
+        bl.addWidget(ttl2)
+        self._placeholder = QLabel('Select a cleanup above to see details')
+        self._placeholder.setAlignment(Qt.AlignCenter)
+        self._placeholder.setStyleSheet(f'color:{DIM}; font-size:12px; font-style:italic;')
+        bl.addWidget(self._placeholder)
         self._detail_tbl = QTableWidget(0, 3)
         self._detail_tbl.setHorizontalHeaderLabels(['Cleaner', 'Freed', 'Status'])
-        self._detail_tbl.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self._detail_tbl.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        self._detail_tbl.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        self._detail_tbl.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
         self._detail_tbl.setEditTriggers(QTableWidget.NoEditTriggers)
         self._detail_tbl.setSelectionMode(QTableWidget.NoSelection)
         self._detail_tbl.verticalHeader().setVisible(False)
-        self._placeholder = QLabel('Select a cleanup above to see details')
-        self._placeholder.setStyleSheet(f'color:{DIM};font-size:12px;')
-        self._placeholder.setAlignment(Qt.AlignCenter)
-        bottom_layout.addWidget(self._placeholder)
-        bottom_layout.addWidget(self._detail_tbl)
+        self._detail_tbl.setShowGrid(False)
         self._detail_tbl.hide()
-        splitter.addWidget(bottom_widget)
+        bl.addWidget(self._detail_tbl)
+        splitter.addWidget(bot)
 
-        splitter.setSizes([300, 200])
-        layout.addWidget(splitter)
+        splitter.setSizes([340, 220])
+        root.addWidget(splitter)
         self._cleanup_ids = []
 
     def refresh(self):
         rows = db_fetch(
-            'SELECT id, ts, trigger, total_freed, home_before, home_after FROM cleanups ORDER BY ts DESC'
+            'SELECT id, ts, trigger, total_freed, home_before, home_after '
+            'FROM cleanups ORDER BY ts DESC'
         )
-        self._cleanup_ids = []
+        self._cleanup_ids = [r['id'] for r in rows]
         self._cleanups_tbl.setRowCount(len(rows))
         for i, r in enumerate(rows):
-            self._cleanup_ids.append(r['id'])
             try:
                 dt = datetime.fromisoformat(r['ts'])
-                ts_str = dt.strftime('%Y-%m-%d %H:%M')
+                ts_str = dt.strftime('%Y-%m-%d   %H:%M')
             except Exception:
                 ts_str = str(r['ts'])[:16]
-            freed_mb = (r['total_freed'] or 0) / 1024
-            home_before = r['home_before'] or 0
-            home_after  = r['home_after']  or 0
-            delta = home_before - home_after
-            delta_str = f'-{delta/1024:.1f} MB' if delta else '—'
-            self._cleanups_tbl.setItem(i, 0, QTableWidgetItem(ts_str))
-            self._cleanups_tbl.setItem(i, 1, QTableWidgetItem(str(r['trigger'] or '')))
-            self._cleanups_tbl.setItem(i, 2, QTableWidgetItem(f'{freed_mb:.1f} MB'))
-            self._cleanups_tbl.setItem(i, 3, QTableWidgetItem(delta_str))
-            for col in range(4):
-                item = self._cleanups_tbl.item(i, col)
-                if item:
-                    item.setForeground(QColor(TEXT))
+            freed_kb   = float(r['total_freed'] or 0)
+            home_b     = float(r['home_before'] or 0)
+            home_a     = float(r['home_after']  or 0)
+            delta_kb   = home_b - home_a
+            delta_str  = f'↓ {fmt_size(delta_kb)}' if delta_kb > 0 else '—'
+            trig       = str(r['trigger'] or '')
+            col3_color = GREEN if delta_kb > 0 else DIM
+
+            data = [
+                (ts_str,            TEXT),
+                (trig,              trigger_color(trig)),
+                (fmt_size(freed_kb), GREEN if freed_kb > 0 else DIM),
+                (delta_str,          col3_color),
+            ]
+            for col, (text, color) in enumerate(data):
+                item = QTableWidgetItem(text)
+                item.setForeground(QColor(color))
+                self._cleanups_tbl.setItem(i, col, item)
+        self._cleanups_tbl.resizeRowsToContents()
 
     def _on_select(self):
-        rows = self._cleanups_tbl.selectedItems()
-        if not rows:
+        idx = self._cleanups_tbl.currentRow()
+        if idx < 0 or idx >= len(self._cleanup_ids):
             self._detail_tbl.hide()
             self._placeholder.show()
             return
-        row_idx = self._cleanups_tbl.currentRow()
-        if row_idx < 0 or row_idx >= len(self._cleanup_ids):
-            return
-        cleanup_id = self._cleanup_ids[row_idx]
+        cid = self._cleanup_ids[idx]
         actions = db_fetch(
-            'SELECT name, freed_kb, status FROM actions WHERE cleanup_id=? ORDER BY freed_kb DESC',
-            (cleanup_id,)
+            'SELECT name, freed_kb, status FROM actions '
+            'WHERE cleanup_id=? ORDER BY freed_kb DESC',
+            (cid,)
         )
         self._detail_tbl.setRowCount(len(actions))
-        status_colors = {'ok': GREEN, 'error': RED, 'skipped': GRAY}
+        STATUS_COLORS = {'ok': GREEN, 'error': RED, 'skipped': GRAY}
         for i, a in enumerate(actions):
-            freed_mb = (a['freed_kb'] or 0) / 1024
-            status_str = str(a['status'] or '')
-            self._detail_tbl.setItem(i, 0, QTableWidgetItem(str(a['name'] or '')))
-            self._detail_tbl.setItem(i, 1, QTableWidgetItem(f'{freed_mb:.1f} MB'))
-            status_item = QTableWidgetItem(status_str)
-            status_item.setForeground(QColor(status_colors.get(status_str, SUB)))
-            self._detail_tbl.setItem(i, 2, status_item)
-            for col in (0, 1):
-                item = self._detail_tbl.item(i, col)
-                if item:
-                    item.setForeground(QColor(TEXT))
+            name   = str(a['name'] or '').replace('_', ' ').title()
+            freed  = fmt_size(float(a['freed_kb'] or 0))
+            status = str(a['status'] or '')
+            data   = [
+                (name,   TEXT),
+                (freed,  GREEN if float(a['freed_kb'] or 0) > 0 else DIM),
+                (status, STATUS_COLORS.get(status, SUB)),
+            ]
+            for col, (text, color) in enumerate(data):
+                item = QTableWidgetItem(text)
+                item.setForeground(QColor(color))
+                self._detail_tbl.setItem(i, col, item)
+        self._detail_tbl.resizeRowsToContents()
         self._placeholder.hide()
         self._detail_tbl.show()
 
@@ -466,33 +530,53 @@ class HistoryTab(QWidget):
 class AnalyticsTab(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(16, 16, 16, 16)
-        layout.setSpacing(12)
+        root = QVBoxLayout(self)
+        root.setContentsMargins(20, 20, 20, 20)
+        root.setSpacing(14)
 
-        # /home usage line chart
-        frame1 = QFrame()
-        frame1.setStyleSheet(f'background:{CARD};border:1px solid rgba(255,255,255,0.08);border-radius:10px;')
-        fl1 = QVBoxLayout(frame1)
-        fl1.setContentsMargins(12, 12, 12, 12)
-        lbl1 = QLabel('/home Usage % — Last 30 Days')
-        lbl1.setStyleSheet(f'color:{SUB};font-size:11px;font-weight:600;')
-        fl1.addWidget(lbl1)
+        # /home usage trend
+        f1 = self._chart_frame('/home Usage %  —  Last 30 Days')
         self._usage_chart = Chart(figsize=(8, 2.8))
-        fl1.addWidget(self._usage_chart)
-        layout.addWidget(frame1)
+        f1.layout().addWidget(self._usage_chart)
+        root.addWidget(f1)
 
-        # Freed per cleanup bar chart
-        frame2 = QFrame()
-        frame2.setStyleSheet(f'background:{CARD};border:1px solid rgba(255,255,255,0.08);border-radius:10px;')
-        fl2 = QVBoxLayout(frame2)
-        fl2.setContentsMargins(12, 12, 12, 12)
-        lbl2 = QLabel('Freed per Cleanup (MB) — Last 20 Runs')
-        lbl2.setStyleSheet(f'color:{SUB};font-size:11px;font-weight:600;')
-        fl2.addWidget(lbl2)
+        # Freed per run
+        f2 = self._chart_frame('Space Freed per Cleanup  —  Last 20 Runs')
         self._freed_chart = Chart(figsize=(8, 2.8))
-        fl2.addWidget(self._freed_chart)
-        layout.addWidget(frame2)
+        f2.layout().addWidget(self._freed_chart)
+
+        # Legend row
+        legend = QHBoxLayout()
+        legend.setSpacing(16)
+        for label, color in [('Manual', BLUE), ('Threshold', AMBER), ('Critical', RED), ('Scheduled', TEAL), ('Other', GRAY)]:
+            dot = QLabel(f'● {label}')
+            dot.setStyleSheet(f'color:{color}; font-size:10px;')
+            legend.addWidget(dot)
+        legend.addStretch()
+        f2.layout().addLayout(legend)
+
+        root.addWidget(f2)
+
+    def _chart_frame(self, title):
+        frame = QFrame()
+        frame.setStyleSheet(f'''
+            QFrame {{
+                background:{CARD};
+                border:1px solid rgba(255,255,255,0.07);
+                border-radius:10px;
+            }}
+        ''')
+        lay = QVBoxLayout(frame)
+        lay.setContentsMargins(16, 14, 16, 10)
+        lay.setSpacing(8)
+        lbl = QLabel(title)
+        lbl.setStyleSheet(f'color:{SUB}; font-size:11px; font-weight:700; letter-spacing:0.04em;')
+        lay.addWidget(lbl)
+        sep = QFrame()
+        sep.setFrameShape(QFrame.HLine)
+        sep.setStyleSheet('background:rgba(255,255,255,0.06); max-height:1px;')
+        lay.addWidget(sep)
+        return frame
 
     def refresh(self):
         self._draw_usage()
@@ -501,31 +585,34 @@ class AnalyticsTab(QWidget):
     def _draw_usage(self):
         cutoff = (datetime.now() - timedelta(days=30)).isoformat()
         rows = db_fetch(
-            '''SELECT date(ts) as day, AVG(used_kb * 100.0 / total_kb) as pct
-               FROM snapshots
-               WHERE partition="/home" AND ts >= ?
-               GROUP BY date(ts)
-               ORDER BY day''',
+            'SELECT date(ts) as day, AVG(used_kb*100.0/total_kb) as pct '
+            'FROM snapshots WHERE partition="/home" AND ts>=? '
+            'GROUP BY date(ts) ORDER BY day',
             (cutoff,)
         )
         self._usage_chart.clear()
         ax = self._usage_chart._ax
         if rows:
             days = [r['day'] for r in rows]
-            pcts = [r['pct'] or 0 for r in rows]
-            ax.plot(range(len(days)), pcts, color=BLUE, linewidth=2, marker='o', markersize=4)
-            ax.fill_between(range(len(days)), pcts, alpha=0.15, color=BLUE)
-            step = max(1, len(days) // 6)
-            ax.set_xticks(range(0, len(days), step))
-            ax.set_xticklabels([days[i][5:] for i in range(0, len(days), step)],
-                               color=DIM, fontsize=8, rotation=30)
+            pcts = [float(r['pct'] or 0) for r in rows]
+            xs   = list(range(len(days)))
+            ax.plot(xs, pcts, color=BLUE, linewidth=2, marker='o', markersize=5,
+                    markerfacecolor=BLUE, markeredgecolor=INSET, markeredgewidth=1.5)
+            ax.fill_between(xs, pcts, alpha=0.12, color=BLUE)
+            # Threshold lines
+            ax.axhline(y=85, color=AMBER, linewidth=0.8, linestyle='--', alpha=0.6, label='Clean 85%')
+            ax.axhline(y=92, color=RED,   linewidth=0.8, linestyle='--', alpha=0.6, label='Critical 92%')
+            step = max(1, len(days) // 7)
+            ax.set_xticks(xs[::step])
+            ax.set_xticklabels([days[i][5:] for i in xs[::step]], color=DIM, fontsize=8, rotation=20)
+            ax.set_ylim(max(0, min(pcts) - 5), 101)
             ax.set_ylabel('%', color=DIM, fontsize=9)
-            ax.set_ylim(0, 100)
             ax.yaxis.label.set_color(DIM)
-            self._usage_chart._fig.tight_layout()
+            ax.legend(fontsize=7.5, framealpha=0, labelcolor=DIM, loc='lower right')
+            self._usage_chart._fig.subplots_adjust(left=0.06, right=0.98, top=0.95, bottom=0.22)
             self._usage_chart.draw()
         else:
-            self._usage_chart.no_data('No /home snapshots yet')
+            self._usage_chart.no_data('No /home snapshots yet — check back after the monitor runs')
 
     def _draw_freed(self):
         rows = db_fetch(
@@ -535,15 +622,16 @@ class AnalyticsTab(QWidget):
         ax = self._freed_chart._ax
         if rows:
             rows = list(reversed(rows))
-            values_mb = [(r['total_freed'] or 0) / 1024 for r in rows]
-            trigger_colors = {
-                'auto': BLUE, 'manual': GREEN, 'critical': RED,
-                'scheduled': AMBER, 'cron': TEAL,
-            }
-            bar_colors = [trigger_colors.get(str(r['trigger'] or '').lower(), GRAY)
-                          for r in rows]
-            x = range(len(rows))
-            ax.bar(x, values_mb, color=bar_colors, width=0.7)
+            values = [(float(r['total_freed'] or 0) / 1024) for r in rows]
+            colors = [trigger_color(r['trigger']) for r in rows]
+            xs     = list(range(len(rows)))
+            bars   = ax.bar(xs, values, color=colors, width=0.65,
+                            edgecolor=INSET, linewidth=0.5)
+            # Value labels on bars
+            for bar, val in zip(bars, values):
+                if val > 0:
+                    ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + max(values)*0.01,
+                            f'{val:.0f}', ha='center', va='bottom', fontsize=7, color=DIM)
             labels = []
             for r in rows:
                 try:
@@ -552,11 +640,11 @@ class AnalyticsTab(QWidget):
                 except Exception:
                     labels.append(str(r['ts'])[:5])
             step = max(1, len(rows) // 8)
-            ax.set_xticks(list(range(0, len(rows), step)))
-            ax.set_xticklabels([labels[i] for i in range(0, len(rows), step)],
-                               color=DIM, fontsize=8, rotation=30)
+            ax.set_xticks(xs[::step])
+            ax.set_xticklabels([labels[i] for i in xs[::step]], color=DIM, fontsize=8, rotation=20)
             ax.set_ylabel('MB', color=DIM, fontsize=9)
-            self._freed_chart._fig.tight_layout()
+            ax.yaxis.label.set_color(DIM)
+            self._freed_chart._fig.subplots_adjust(left=0.07, right=0.98, top=0.88, bottom=0.22)
             self._freed_chart.draw()
         else:
             self._freed_chart.no_data('No cleanups yet')
@@ -568,52 +656,73 @@ class CleanupTab(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(16, 16, 16, 16)
-        layout.setSpacing(12)
+        root = QVBoxLayout(self)
+        root.setContentsMargins(20, 20, 20, 20)
+        root.setSpacing(14)
 
-        # Usage label
-        self._usage_lbl = QLabel()
-        self._usage_lbl.setStyleSheet(f'color:{TEXT};font-size:14px;')
-        layout.addWidget(self._usage_lbl)
+        # Disk status bar
+        status_frame = QFrame()
+        status_frame.setStyleSheet(f'''
+            QFrame {{
+                background:{CARD};
+                border:1px solid rgba(255,255,255,0.07);
+                border-radius:10px;
+            }}
+        ''')
+        sf_lay = QHBoxLayout(status_frame)
+        sf_lay.setContentsMargins(18, 14, 18, 14)
+        sf_lay.setSpacing(32)
+        self._bar_home = UsageBar('/home')
+        self._bar_root = UsageBar('/')
+        sf_lay.addWidget(self._bar_home, 1)
+        sf_lay.addWidget(self._bar_root, 1)
+        root.addWidget(status_frame)
 
-        # Run button
-        self._run_btn = QPushButton('Run Cleanup Now')
-        self._run_btn.setFixedHeight(44)
+        # Run button — solid, prominent
+        self._run_btn = QPushButton('  Run Cleanup Now')
+        self._run_btn.setObjectName('primaryBtn')
+        self._run_btn.setFixedHeight(48)
+        self._run_btn.setFont(QFont('sans-serif', 13, QFont.Bold))
         self._run_btn.clicked.connect(self._run_cleanup)
-        layout.addWidget(self._run_btn)
+        root.addWidget(self._run_btn)
 
-        # Output area
-        out_lbl = QLabel('Output')
-        out_lbl.setStyleSheet(f'color:{SUB};font-size:11px;font-weight:600;')
-        layout.addWidget(out_lbl)
+        # Output frame
+        out_frame = QFrame()
+        out_frame.setStyleSheet(f'''
+            QFrame {{
+                background:{CARD};
+                border:1px solid rgba(255,255,255,0.07);
+                border-radius:10px;
+            }}
+        ''')
+        of_lay = QVBoxLayout(out_frame)
+        of_lay.setContentsMargins(14, 12, 14, 12)
+        of_lay.setSpacing(8)
+        out_hdr = QHBoxLayout()
+        out_lbl = QLabel('Output Log')
+        out_lbl.setStyleSheet(f'color:{SUB}; font-size:11px; font-weight:700; letter-spacing:0.04em;')
+        out_hdr.addWidget(out_lbl)
+        out_hdr.addStretch()
+        self._status_lbl = QLabel('Idle')
+        self._status_lbl.setStyleSheet(f'color:{DIM}; font-size:11px;')
+        out_hdr.addWidget(self._status_lbl)
+        of_lay.addLayout(out_hdr)
+        sep = QFrame()
+        sep.setFrameShape(QFrame.HLine)
+        sep.setStyleSheet('background:rgba(255,255,255,0.06); max-height:1px;')
+        of_lay.addWidget(sep)
         self._output = QTextEdit()
         self._output.setReadOnly(True)
-        self._output.setFont(QFont('monospace', 10))
+        self._output.setFont(QFont('Ubuntu Mono, Consolas, monospace', 10))
         self._output.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        layout.addWidget(self._output)
-
-        # Status
-        self._status_lbl = QLabel('Idle')
-        self._status_lbl.setStyleSheet(f'color:{GRAY};font-size:12px;')
-        layout.addWidget(self._status_lbl)
+        of_lay.addWidget(self._output)
+        root.addWidget(out_frame)
 
         self._process = None
-        self.refresh()
 
     def refresh(self):
-        try:
-            usage = shutil.disk_usage('/home')
-            pct = int(usage.used / usage.total * 100)
-            used_g = usage.used / (1024 ** 3)
-            total_g = usage.total / (1024 ** 3)
-            color = GREEN if pct < 70 else BLUE if pct < 85 else AMBER if pct < 92 else RED
-            self._usage_lbl.setText(
-                f'<span style="color:{color};font-size:24px;font-weight:700;">{pct}%</span>'
-                f'<span style="color:{DIM};font-size:13px;"> used on /home ({used_g:.1f}G / {total_g:.1f}G)</span>'
-            )
-        except Exception:
-            self._usage_lbl.setText('<span style="color:#6b7280;">Usage unavailable</span>')
+        self._bar_home.refresh()
+        self._bar_root.refresh()
 
     def _run_cleanup(self):
         if not os.path.exists(CLEANER):
@@ -622,7 +731,7 @@ class CleanupTab(QWidget):
         self._run_btn.setEnabled(False)
         self._output.clear()
         self._status_lbl.setText('Running…')
-        self._status_lbl.setStyleSheet(f'color:{AMBER};font-size:12px;')
+        self._status_lbl.setStyleSheet(f'color:{AMBER}; font-size:11px; font-weight:600;')
 
         self._process = QProcess(self)
         self._process.setProcessChannelMode(QProcess.MergedChannels)
@@ -636,14 +745,14 @@ class CleanupTab(QWidget):
             self._output.moveCursor(self._output.textCursor().End)
             self._output.insertPlainText(data)
 
-    def _on_done(self, exit_code, exit_status):
+    def _on_done(self, exit_code, _):
         self._run_btn.setEnabled(True)
         if exit_code == 0:
             self._status_lbl.setText('Done')
-            self._status_lbl.setStyleSheet(f'color:{GREEN};font-size:12px;')
+            self._status_lbl.setStyleSheet(f'color:{GREEN}; font-size:11px; font-weight:600;')
         else:
             self._status_lbl.setText(f'Exited with code {exit_code}')
-            self._status_lbl.setStyleSheet(f'color:{RED};font-size:12px;')
+            self._status_lbl.setStyleSheet(f'color:{RED}; font-size:11px; font-weight:600;')
         self.refresh()
         self.cleanup_done.emit()
 
@@ -652,136 +761,132 @@ class CleanupTab(QWidget):
 class SettingsTab(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(16, 16, 16, 16)
-        layout.setSpacing(16)
+        root = QVBoxLayout(self)
+        root.setContentsMargins(20, 20, 20, 20)
+        root.setSpacing(16)
 
-        grp = QGroupBox('Thresholds & Intervals')
-        grp.setStyleSheet(f'''
-            QGroupBox {{
-                color:{SUB};
-                font-size:11px;
-                font-weight:600;
-                border:1px solid rgba(255,255,255,0.08);
-                border-radius:8px;
-                margin-top:8px;
-            }}
-            QGroupBox::title {{
-                subcontrol-origin:margin;
-                left:10px;
-                padding:0 4px;
-            }}
-        ''')
-        grp_layout = QVBoxLayout(grp)
-        grp_layout.setSpacing(10)
+        # Thresholds group
+        grp1 = self._group('Disk Thresholds')
+        self._warn     = self._spin_row(grp1, 'Warn at',     0, 100, '%')
+        self._clean    = self._spin_row(grp1, 'Auto-clean at',  0, 100, '%')
+        self._critical = self._spin_row(grp1, 'Critical alert at', 0, 100, '%')
+        root.addWidget(grp1)
 
-        def make_row(label, key, lo=0, hi=100, suffix=''):
-            row = QHBoxLayout()
-            lbl = QLabel(f'{label}:')
-            lbl.setStyleSheet(f'color:{TEXT};font-size:12px;')
-            lbl.setFixedWidth(220)
-            spin = QSpinBox()
-            spin.setRange(lo, hi)
-            spin.setSuffix(f' {suffix}' if suffix else '')
-            spin.setFixedWidth(110)
-            row.addWidget(lbl)
-            row.addWidget(spin)
-            row.addStretch()
-            grp_layout.addLayout(row)
-            return spin
+        # Intervals group
+        grp2 = self._group('Timing')
+        self._check    = self._spin_row(grp2, 'Check interval',    1, 1440, 'min')
+        self._snapshot = self._spin_row(grp2, 'Snapshot interval', 1, 1440, 'min')
+        self._cooldown = self._spin_row(grp2, 'Cooldown between auto-cleans', 0, 720, 'hours')
+        root.addWidget(grp2)
 
-        self._warn     = make_row('Warn Threshold',       'WARN_THRESHOLD',     0, 100, '%')
-        self._clean    = make_row('Clean Threshold',      'CLEAN_THRESHOLD',    0, 100, '%')
-        self._critical = make_row('Critical Threshold',   'CRITICAL_THRESHOLD', 0, 100, '%')
-        self._cooldown = make_row('Cooldown',              'COOLDOWN',           0, 720, 'hours')
-        self._check    = make_row('Check Interval',        'CHECK_INTERVAL',     1, 1440, 'min')
-        self._snapshot = make_row('Snapshot Interval',    'SNAPSHOT_INTERVAL',  1, 1440, 'min')
-
-        layout.addWidget(grp)
-
+        # Buttons
         btn_row = QHBoxLayout()
+        btn_row.setSpacing(10)
         save_btn = QPushButton('Save Settings')
-        save_btn.setFixedHeight(38)
+        save_btn.setObjectName('primaryBtn')
+        save_btn.setFixedHeight(40)
         save_btn.clicked.connect(self._save)
         restart_btn = QPushButton('Restart Monitor Service')
-        restart_btn.setFixedHeight(38)
+        restart_btn.setFixedHeight(40)
         restart_btn.clicked.connect(self._restart_service)
         btn_row.addWidget(save_btn)
         btn_row.addWidget(restart_btn)
         btn_row.addStretch()
-        layout.addLayout(btn_row)
+        root.addLayout(btn_row)
 
         self._msg = QLabel('')
-        self._msg.setStyleSheet(f'color:{GREEN};font-size:12px;')
-        layout.addWidget(self._msg)
-        layout.addStretch()
+        self._msg.setStyleSheet(f'color:{GREEN}; font-size:12px;')
+        root.addWidget(self._msg)
+        root.addStretch()
 
         self._load_config()
+
+    def _group(self, title):
+        grp = QFrame()
+        grp.setStyleSheet(f'''
+            QFrame {{
+                background:{CARD};
+                border:1px solid rgba(255,255,255,0.07);
+                border-radius:10px;
+            }}
+        ''')
+        lay = QVBoxLayout(grp)
+        lay.setContentsMargins(18, 14, 18, 16)
+        lay.setSpacing(12)
+        lbl = QLabel(title.upper())
+        lbl.setStyleSheet(f'color:{DIM}; font-size:10px; font-weight:700; letter-spacing:0.08em;')
+        lay.addWidget(lbl)
+        sep = QFrame()
+        sep.setFrameShape(QFrame.HLine)
+        sep.setStyleSheet('background:rgba(255,255,255,0.06); max-height:1px;')
+        lay.addWidget(sep)
+        return grp
+
+    def _spin_row(self, parent_frame, label, lo, hi, suffix):
+        row = QHBoxLayout()
+        lbl = QLabel(label + ':')
+        lbl.setStyleSheet(f'color:{TEXT}; font-size:12px;')
+        lbl.setFixedWidth(240)
+        spin = QSpinBox()
+        spin.setRange(lo, hi)
+        spin.setSuffix(f'  {suffix}')
+        spin.setFixedWidth(120)
+        row.addWidget(lbl)
+        row.addWidget(spin)
+        row.addStretch()
+        parent_frame.layout().addLayout(row)
+        return spin
 
     def _load_config(self):
         if not CONFIG_PATH.exists():
             return
         try:
             text = CONFIG_PATH.read_text()
-            def get_val(key, default=0):
+            def gv(key, default=0):
                 m = re.search(rf'^{key}\s*=\s*(\d+)', text, re.MULTILINE)
                 return int(m.group(1)) if m else default
-
-            self._warn.setValue(get_val('WARN_THRESHOLD', 80))
-            self._clean.setValue(get_val('CLEAN_THRESHOLD', 85))
-            self._critical.setValue(get_val('CRITICAL_THRESHOLD', 92))
-            # Config stores seconds; display as hours/minutes
-            cooldown_sec = get_val('COOLDOWN', 14400)
-            self._cooldown.setValue(cooldown_sec // 3600)
-            check_sec = get_val('CHECK_INTERVAL', 300)
-            self._check.setValue(check_sec // 60)
-            snap_sec = get_val('SNAPSHOT_INTERVAL', 1800)
-            self._snapshot.setValue(snap_sec // 60)
+            self._warn.setValue(gv('WARN_THRESHOLD', 80))
+            self._clean.setValue(gv('CLEAN_THRESHOLD', 85))
+            self._critical.setValue(gv('CRITICAL_THRESHOLD', 92))
+            self._cooldown.setValue(gv('COOLDOWN', 14400) // 3600)
+            self._check.setValue(gv('CHECK_INTERVAL', 300) // 60)
+            self._snapshot.setValue(gv('SNAPSHOT_INTERVAL', 1800) // 60)
         except Exception as e:
-            self._msg.setStyleSheet(f'color:{RED};font-size:12px;')
+            self._msg.setStyleSheet(f'color:{RED}; font-size:12px;')
             self._msg.setText(f'Error loading config: {e}')
 
     def _save(self):
         if not CONFIG_PATH.exists():
-            self._msg.setStyleSheet(f'color:{RED};font-size:12px;')
+            self._msg.setStyleSheet(f'color:{RED}; font-size:12px;')
             self._msg.setText('Config file not found.')
             return
         try:
             text = CONFIG_PATH.read_text()
-
-            def replace_val(key, value):
-                return re.sub(
-                    rf'^({key}\s*=\s*)\d+',
-                    lambda m: m.group(1) + str(value),
-                    text,
-                    flags=re.MULTILINE,
-                )
-
-            text = replace_val('WARN_THRESHOLD',     self._warn.value())
-            text = replace_val('CLEAN_THRESHOLD',    self._clean.value())
-            text = replace_val('CRITICAL_THRESHOLD', self._critical.value())
-            text = replace_val('COOLDOWN',           self._cooldown.value() * 3600)
-            text = replace_val('CHECK_INTERVAL',     self._check.value() * 60)
-            text = replace_val('SNAPSHOT_INTERVAL',  self._snapshot.value() * 60)
-
+            def rv(key, val):
+                return re.sub(rf'^({key}\s*=\s*)\d+', lambda m: m.group(1) + str(val), text, flags=re.MULTILINE)
+            text = rv('WARN_THRESHOLD',     self._warn.value())
+            text = rv('CLEAN_THRESHOLD',    self._clean.value())
+            text = rv('CRITICAL_THRESHOLD', self._critical.value())
+            text = rv('COOLDOWN',           self._cooldown.value() * 3600)
+            text = rv('CHECK_INTERVAL',     self._check.value() * 60)
+            text = rv('SNAPSHOT_INTERVAL',  self._snapshot.value() * 60)
             CONFIG_PATH.write_text(text)
-            self._msg.setStyleSheet(f'color:{GREEN};font-size:12px;')
-            self._msg.setText('Settings saved.')
+            self._msg.setStyleSheet(f'color:{GREEN}; font-size:12px;')
+            self._msg.setText('Settings saved successfully.')
         except Exception as e:
-            self._msg.setStyleSheet(f'color:{RED};font-size:12px;')
-            self._msg.setText(f'Error saving: {e}')
+            self._msg.setStyleSheet(f'color:{RED}; font-size:12px;')
+            self._msg.setText(f'Error: {e}')
 
     def _restart_service(self):
         proc = QProcess(self)
         proc.start('systemctl', ['--user', 'restart', 'disk-monitor.service'])
         proc.waitForFinished(5000)
-        exit_code = proc.exitCode()
-        if exit_code == 0:
-            self._msg.setStyleSheet(f'color:{GREEN};font-size:12px;')
-            self._msg.setText('Service restarted.')
+        if proc.exitCode() == 0:
+            self._msg.setStyleSheet(f'color:{GREEN}; font-size:12px;')
+            self._msg.setText('Monitor service restarted.')
         else:
-            self._msg.setStyleSheet(f'color:{RED};font-size:12px;')
-            self._msg.setText(f'Restart failed (exit {exit_code}).')
+            self._msg.setStyleSheet(f'color:{RED}; font-size:12px;')
+            self._msg.setText(f'Restart failed (exit {proc.exitCode()}).')
 
 
 # ─── Main Window ──────────────────────────────────────────────────────────────
@@ -789,11 +894,10 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle('Disk Monitor')
-        self.resize(1100, 760)
+        self.resize(1120, 780)
         self._build_ui()
         self._apply_qss()
         self._refresh_all()
-
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._refresh_all)
         self._timer.start(60_000)
@@ -805,42 +909,74 @@ class MainWindow(QMainWindow):
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
-        # ── Header ──────────────────────────────────────────────────────────
+        # ── Header ────────────────────────────────────────────────────────────
         header = QWidget()
-        header.setObjectName('header')
-        header.setFixedHeight(64)
-        header.setStyleSheet(f'background:{CARD};border-bottom:1px solid rgba(255,255,255,0.06);')
-        h_layout = QHBoxLayout(header)
-        h_layout.setContentsMargins(20, 0, 20, 0)
-        h_layout.setSpacing(16)
+        header.setObjectName('appHeader')
+        header.setFixedHeight(68)
+        hl = QHBoxLayout(header)
+        hl.setContentsMargins(24, 10, 20, 0)
+        hl.setSpacing(0)
 
+        title_col = QVBoxLayout()
+        title_col.setSpacing(2)
         title = QLabel('Disk Monitor')
-        title.setStyleSheet(f'color:{TEXT};font-size:17px;font-weight:700;')
-        h_layout.addWidget(title)
+        title.setStyleSheet(f'color:{TEXT}; font-size:16px; font-weight:700; letter-spacing:-0.02em;')
+        subtitle = QLabel('Cache cleaner  ·  Analytics')
+        subtitle.setStyleSheet(f'color:{DIM}; font-size:10px;')
+        title_col.addWidget(title)
+        title_col.addWidget(subtitle)
+        hl.addLayout(title_col)
 
-        h_layout.addSpacing(24)
+        hl.addSpacing(32)
 
+        # Separator
+        sep = QFrame()
+        sep.setFrameShape(QFrame.VLine)
+        sep.setStyleSheet('color: rgba(255,255,255,0.08);')
+        sep.setFixedHeight(36)
+        hl.addWidget(sep)
+
+        hl.addSpacing(24)
+
+        # Usage bars
         self._bar_home = UsageBar('/home')
         self._bar_root = UsageBar('/')
-        h_layout.addWidget(self._bar_home)
-        h_layout.addWidget(self._bar_root)
+        hl.addWidget(self._bar_home)
+        hl.addSpacing(28)
+        hl.addWidget(self._bar_root)
 
-        h_layout.addStretch()
+        hl.addStretch()
 
-        self._refresh_btn = QPushButton('↻ Refresh')
-        self._refresh_btn.setFixedHeight(32)
+        self._refresh_btn = QPushButton('↻  Refresh')
+        self._refresh_btn.setFixedHeight(36)
+        self._refresh_btn.setFixedWidth(108)
+        self._refresh_btn.setObjectName('refreshBtn')
         self._refresh_btn.clicked.connect(self._refresh_all)
-        h_layout.addWidget(self._refresh_btn)
+        hl.addWidget(self._refresh_btn)
 
-        self._cleanup_btn = QPushButton('⚡ Run Cleanup')
-        self._cleanup_btn.setFixedHeight(32)
+        hl.addSpacing(8)
+
+        self._cleanup_btn = QPushButton('⚡  Run Cleanup')
+        self._cleanup_btn.setFixedHeight(36)
+        self._cleanup_btn.setFixedWidth(148)
         self._cleanup_btn.setObjectName('cleanupBtn')
         self._cleanup_btn.clicked.connect(self._trigger_cleanup)
-        h_layout.addWidget(self._cleanup_btn)
+        glow = QGraphicsDropShadowEffect()
+        glow.setBlurRadius(18)
+        glow.setOffset(0, 0)
+        glow.setColor(QColor(34, 197, 94, 140))
+        self._cleanup_btn.setGraphicsEffect(glow)
+        hl.addWidget(self._cleanup_btn)
 
         root.addWidget(header)
 
-        # ── Tabs ────────────────────────────────────────────────────────────
+        # Divider
+        div = QFrame()
+        div.setFixedHeight(1)
+        div.setStyleSheet(f'background:rgba(255,255,255,0.06);')
+        root.addWidget(div)
+
+        # ── Tabs ──────────────────────────────────────────────────────────────
         self._tabs = QTabWidget()
         self._tabs.setDocumentMode(True)
         root.addWidget(self._tabs)
@@ -860,163 +996,244 @@ class MainWindow(QMainWindow):
         self._tab_cleanup.cleanup_done.connect(self._refresh_all)
 
     def _apply_qss(self):
-        qss = f"""
+        self.setStyleSheet(f"""
             QMainWindow, QWidget {{
                 background:{BG};
                 color:{TEXT};
+                font-family:'Ubuntu','Segoe UI',sans-serif;
+                font-size:13px;
+            }}
+            QWidget#appHeader {{
+                background:{CARD};
             }}
             QTabWidget::pane {{
                 border:none;
                 background:{BG};
             }}
+            QTabBar {{
+                background:{CARD};
+            }}
             QTabBar::tab {{
                 background:{CARD};
-                color:{SUB};
-                padding:8px 20px;
+                color:{DIM};
+                padding:10px 24px;
+                padding-top:20px;
                 border:none;
                 border-bottom:2px solid transparent;
                 font-size:12px;
                 font-weight:600;
+                letter-spacing:0.02em;
             }}
             QTabBar::tab:selected {{
                 color:{TEXT};
                 border-bottom:2px solid {BLUE};
                 background:{BG};
             }}
-            QTabBar::tab:hover {{
-                color:{TEXT};
-            }}
-            QProgressBar {{
-                background:{INSET};
-                border:none;
-                border-radius:5px;
-                height:10px;
-            }}
-            QProgressBar::chunk {{
-                background:{BLUE};
-                border-radius:5px;
+            QTabBar::tab:hover:!selected {{
+                color:{SUB};
+                background:rgba(255,255,255,0.03);
             }}
             QPushButton {{
-                background:{CARD};
+                background: qlineargradient(x1:0,y1:0,x2:0,y2:1,
+                    stop:0 rgba(255,255,255,0.10),
+                    stop:1 rgba(255,255,255,0.04));
                 color:{TEXT};
-                border:1px solid rgba(255,255,255,0.10);
-                border-radius:6px;
+                border:1px solid rgba(255,255,255,0.14);
+                border-top:1px solid rgba(255,255,255,0.22);
+                border-bottom:1px solid rgba(0,0,0,0.30);
+                border-radius:8px;
                 padding:6px 16px;
                 font-size:12px;
                 font-weight:600;
+                letter-spacing:0.02em;
             }}
             QPushButton:hover {{
-                background:#2a2a30;
-                border:1px solid rgba(255,255,255,0.18);
+                background: qlineargradient(x1:0,y1:0,x2:0,y2:1,
+                    stop:0 rgba(255,255,255,0.16),
+                    stop:1 rgba(255,255,255,0.08));
+                border:1px solid rgba(255,255,255,0.22);
+                border-top:1px solid rgba(255,255,255,0.32);
             }}
             QPushButton:pressed {{
-                background:{INSET};
+                background: qlineargradient(x1:0,y1:0,x2:0,y2:1,
+                    stop:0 rgba(0,0,0,0.10),
+                    stop:1 rgba(255,255,255,0.04));
+                border-top:1px solid rgba(0,0,0,0.20);
             }}
             QPushButton:disabled {{
                 color:{DIM};
-                border:1px solid rgba(255,255,255,0.04);
+                background:rgba(255,255,255,0.03);
+                border:1px solid rgba(255,255,255,0.05);
+            }}
+            QPushButton#refreshBtn {{
+                background: qlineargradient(x1:0,y1:0,x2:0,y2:1,
+                    stop:0 #3a3a3a,
+                    stop:1 #2c2c2c);
+                color:{SUB};
+                border:1px solid rgba(255,255,255,0.12);
+                border-top:1px solid rgba(255,255,255,0.20);
+                border-bottom:1px solid rgba(0,0,0,0.35);
+                border-radius:8px;
+                font-size:12px;
+                font-weight:600;
+            }}
+            QPushButton#refreshBtn:hover {{
+                background: qlineargradient(x1:0,y1:0,x2:0,y2:1,
+                    stop:0 #424242,
+                    stop:1 #333333);
+                color:{TEXT};
+            }}
+            QPushButton#refreshBtn:pressed {{
+                background: qlineargradient(x1:0,y1:0,x2:0,y2:1,
+                    stop:0 #242424,
+                    stop:1 #2e2e2e);
+            }}
+            QPushButton#primaryBtn {{
+                background: qlineargradient(x1:0,y1:0,x2:0,y2:1,
+                    stop:0 #5b9cf6,
+                    stop:1 #2563eb);
+                color:#ffffff;
+                border:none;
+                border-top:1px solid rgba(255,255,255,0.30);
+                border-bottom:2px solid rgba(0,0,0,0.30);
+                border-radius:8px;
+                font-size:13px;
+                font-weight:700;
+                letter-spacing:0.01em;
+            }}
+            QPushButton#primaryBtn:hover {{
+                background: qlineargradient(x1:0,y1:0,x2:0,y2:1,
+                    stop:0 #6baaf8,
+                    stop:1 #2d72f5);
+            }}
+            QPushButton#primaryBtn:pressed {{
+                background: qlineargradient(x1:0,y1:0,x2:0,y2:1,
+                    stop:0 #1d4ed8,
+                    stop:1 #1e40af);
+                border-top:1px solid rgba(0,0,0,0.20);
+            }}
+            QPushButton#primaryBtn:disabled {{
+                background:#1e3a5f;
+                color:#4b6fa8;
+                border:none;
             }}
             QPushButton#cleanupBtn {{
-                background:rgba(34,197,94,0.12);
-                color:{GREEN};
-                border:1px solid rgba(34,197,94,0.25);
+                background: qlineargradient(x1:0,y1:0,x2:0,y2:1,
+                    stop:0 #2ecc71,
+                    stop:1 #16a34a);
+                color:#ffffff;
+                border:none;
+                border-top:1px solid rgba(255,255,255,0.30);
+                border-bottom:2px solid rgba(0,0,0,0.25);
+                border-radius:8px;
+                font-size:12px;
+                font-weight:700;
+                letter-spacing:0.02em;
             }}
             QPushButton#cleanupBtn:hover {{
-                background:rgba(34,197,94,0.20);
+                background: qlineargradient(x1:0,y1:0,x2:0,y2:1,
+                    stop:0 #3dda7e,
+                    stop:1 #1cb857);
+            }}
+            QPushButton#cleanupBtn:pressed {{
+                background: qlineargradient(x1:0,y1:0,x2:0,y2:1,
+                    stop:0 #128a3a,
+                    stop:1 #166534);
+                border-top:1px solid rgba(0,0,0,0.20);
+            }}
+            QLabel {{
+                padding: 2px 5px;
+                border-radius: 4px;
             }}
             QTableWidget {{
                 background:{CARD};
-                border:1px solid rgba(255,255,255,0.08);
+                border:1px solid rgba(255,255,255,0.07);
                 border-radius:8px;
-                gridline-color:rgba(255,255,255,0.04);
+                gridline-color:transparent;
                 color:{TEXT};
                 font-size:12px;
-                selection-background-color:rgba(59,130,246,0.18);
+                selection-background-color:rgba(59,130,246,0.15);
+                selection-color:{TEXT};
+                outline:none;
+            }}
+            QTableWidget::item {{
+                padding:5px 12px;
+                border-bottom:1px solid rgba(255,255,255,0.04);
+                border-radius:4px;
+            }}
+            QTableWidget::item:selected {{
+                background:rgba(59,130,246,0.15);
+                border-radius:4px;
             }}
             QHeaderView::section {{
                 background:{INSET};
                 color:{DIM};
                 border:none;
                 border-bottom:1px solid rgba(255,255,255,0.07);
-                padding:6px 10px;
+                padding:5px 12px;
                 font-size:10px;
-                font-weight:600;
-                text-transform:uppercase;
-                letter-spacing:0.04em;
+                font-weight:700;
+                letter-spacing:0.06em;
             }}
             QScrollBar:vertical {{
-                background:{INSET};
-                width:8px;
-                border-radius:4px;
+                background:transparent;
+                width:6px;
+                margin:0;
             }}
             QScrollBar::handle:vertical {{
-                background:{DIM};
-                border-radius:4px;
-                min-height:20px;
+                background:rgba(255,255,255,0.12);
+                border-radius:3px;
+                min-height:24px;
             }}
-            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
-                height:0;
+            QScrollBar::handle:vertical:hover {{
+                background:rgba(255,255,255,0.20);
             }}
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height:0; }}
             QScrollBar:horizontal {{
-                background:{INSET};
-                height:8px;
-                border-radius:4px;
+                background:transparent;
+                height:6px;
             }}
             QScrollBar::handle:horizontal {{
-                background:{DIM};
-                border-radius:4px;
-                min-width:20px;
+                background:rgba(255,255,255,0.12);
+                border-radius:3px;
+                min-width:24px;
             }}
-            QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{
-                width:0;
-            }}
+            QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{ width:0; }}
             QTextEdit {{
                 background:{INSET};
-                color:{TEXT};
-                border:1px solid rgba(255,255,255,0.08);
+                color:{SUB};
+                border:1px solid rgba(255,255,255,0.07);
                 border-radius:8px;
-                font-family:monospace;
+                font-family:'Ubuntu Mono','Consolas',monospace;
                 font-size:11px;
-                padding:6px;
+                padding:5px;
+                selection-background-color:rgba(59,130,246,0.3);
             }}
             QSpinBox {{
                 background:{INSET};
                 color:{TEXT};
                 border:1px solid rgba(255,255,255,0.10);
-                border-radius:5px;
-                padding:4px 8px;
+                border-radius:6px;
+                padding:5px 8px;
                 font-size:12px;
+            }}
+            QSpinBox:focus {{
+                border:1px solid rgba(59,130,246,0.6);
             }}
             QSpinBox::up-button, QSpinBox::down-button {{
                 background:{CARD};
                 border:none;
-                width:16px;
-            }}
-            QGroupBox {{
-                color:{SUB};
-                font-size:11px;
-                font-weight:600;
-                border:1px solid rgba(255,255,255,0.08);
-                border-radius:8px;
-                margin-top:8px;
-                padding-top:8px;
-            }}
-            QGroupBox::title {{
-                subcontrol-origin:margin;
-                left:10px;
-                padding:0 4px;
-            }}
-            QLabel {{
-                color:{TEXT};
-            }}
-            QFrame {{
-                border:none;
+                width:18px;
+                border-radius:3px;
             }}
             QSplitter::handle {{
-                background:rgba(255,255,255,0.06);
+                background:rgba(255,255,255,0.05);
+                height:2px;
             }}
-        """
-        self.setStyleSheet(qss)
+            QFrame[frameShape="4"], QFrame[frameShape="5"] {{
+                color:rgba(255,255,255,0.06);
+            }}
+        """)
 
     def _refresh_all(self):
         self._bar_home.refresh()
@@ -1036,7 +1253,6 @@ if __name__ == '__main__':
     app = QApplication(sys.argv)
     app.setApplicationName('disk-gui')
     app.setOrganizationName('disk-monitor')
-
     window = MainWindow()
     window.show()
     sys.exit(app.exec_())
