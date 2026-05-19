@@ -21,10 +21,20 @@ Watches your disk partitions, cleans caches when thresholds are hit, and gives y
 
 ## Screenshots
 
-> Add screenshots here after first run:
-> - `disk-gui` dashboard (Tab 1: Dashboard)
-> - `disk-gui` analytics (Tab 3: Analytics)
-> - `disk-stats` terminal output
+### Dashboard — stat cards + freed-by-cache donut chart
+![Dashboard](assets/screenshot-dashboard.png)
+
+### Analytics — disk usage trend + freed per cleanup
+![Analytics](assets/screenshot-analytics.png)
+
+### History — full cleanup log with per-cleaner breakdown
+![History](assets/screenshot-history.png)
+
+### Cleanup — live output from disk-cleaner
+![Cleanup](assets/screenshot-cleanup.png)
+
+### Settings — configure thresholds and intervals
+![Settings](assets/screenshot-settings.png)
 
 ---
 
