@@ -1,0 +1,6 @@
+[Unit]
+Description=Disk Cleaner — scheduled cache cleanup
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/disk-cleaner scheduled

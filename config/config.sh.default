@@ -1,0 +1,18 @@
+# disk-monitor configuration
+
+# Thresholds (percent of partition used)
+WARN_THRESHOLD=80       # log a warning
+CLEAN_THRESHOLD=85      # trigger auto-clean
+CRITICAL_THRESHOLD=92   # trigger clean + desktop alert
+
+# Partitions to watch
+MONITOR_PARTITIONS=("/home" "/")
+
+# How long to wait before auto-triggering again (seconds)
+COOLDOWN=14400          # 4 hours
+
+# How often the monitor checks disk usage (seconds)
+CHECK_INTERVAL=300      # 5 minutes
+
+# How often to record a disk snapshot for trend tracking (seconds)
+SNAPSHOT_INTERVAL=1800  # 30 minutes

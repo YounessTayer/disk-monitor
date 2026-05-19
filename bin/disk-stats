@@ -1,0 +1,81 @@
+#!/usr/bin/env bash
+# disk-stats — show disk usage, cleanup history, and trend
+
+DB="$HOME/.local/share/disk-monitor/stats.db"
+SQLITE3=$(command -v sqlite3 2>/dev/null) || { echo "sqlite3 not found" >&2; exit 1; }
+
+[[ ! -f "$DB" ]] && { echo "No database yet. Run: disk-cleaner"; exit 1; }
+
+S() { "$SQLITE3" -column -header "$DB" "$1"; }
+hr() { printf '%.0s─' {1..64}; echo; }
+
+echo
+echo "DISK USAGE  $(date '+%Y-%m-%d %H:%M:%S')"
+hr
+df -h /home / | grep -v tmpfs
+echo
+
+echo "ALL-TIME TOTALS"
+hr
+S "SELECT
+  COUNT(*)                                          AS cleanups,
+  printf('%.2f GB', SUM(total_freed)/1048576.0)    AS total_freed,
+  printf('%.0f MB', AVG(total_freed)/1024.0)       AS avg_per_run,
+  datetime(MAX(ts))                                 AS last_cleanup
+FROM cleanups WHERE total_freed > 0;"
+echo
+
+echo "LAST 10 CLEANUPS"
+hr
+S "SELECT
+  ts                                                AS timestamp,
+  trigger,
+  printf('%.0f MB', total_freed/1024.0)            AS freed,
+  CASE WHEN home_before > 0 AND home_after IS NOT NULL
+    THEN printf('-%.1f%%', (home_before - home_after)*100.0/home_before)
+    ELSE '?'
+  END                                               AS home_delta
+FROM cleanups
+ORDER BY id DESC LIMIT 10;"
+echo
+
+echo "TOP CACHE CLEANERS (all-time)"
+hr
+S "SELECT
+  name,
+  COUNT(*)                                          AS runs,
+  printf('%.2f GB', SUM(freed_kb)/1048576.0)       AS total_freed,
+  printf('%.0f MB', AVG(freed_kb)/1024.0)          AS avg_freed,
+  SUM(CASE WHEN status='error'   THEN 1 ELSE 0 END) AS errors,
+  SUM(CASE WHEN status='skipped' THEN 1 ELSE 0 END) AS skips
+FROM actions
+GROUP BY name
+ORDER BY SUM(freed_kb) DESC;"
+echo
+
+echo "/home USAGE TREND — LAST 14 DAYS"
+hr
+S "SELECT
+  date(ts)                                          AS date,
+  printf('%.1f%%', AVG(used_kb*100.0/total_kb))    AS avg_use,
+  printf('%.1f GB', MIN(used_kb)/1048576.0)         AS min_used,
+  printf('%.1f GB', MAX(used_kb)/1048576.0)         AS max_used,
+  printf('%.1f GB', AVG(avail_kb)/1048576.0)        AS avg_free
+FROM snapshots
+WHERE partition='/home' AND ts >= datetime('now','-14 days')
+GROUP BY date(ts)
+ORDER BY date ASC;"
+echo
+
+echo "/ (ROOT) USAGE TREND — LAST 14 DAYS"
+hr
+S "SELECT
+  date(ts)                                          AS date,
+  printf('%.1f%%', AVG(used_kb*100.0/total_kb))    AS avg_use,
+  printf('%.1f GB', MAX(used_kb)/1048576.0)         AS max_used,
+  printf('%.1f GB', AVG(avail_kb)/1048576.0)        AS avg_free
+FROM snapshots
+WHERE partition='/' AND ts >= datetime('now','-14 days')
+GROUP BY date(ts)
+ORDER BY date ASC;"
+echo

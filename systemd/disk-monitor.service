@@ -1,0 +1,12 @@
+[Unit]
+Description=Disk Monitor — watches usage and triggers auto-cleanup
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/disk-monitor
+Restart=always
+RestartSec=15
+
+[Install]
+WantedBy=default.target

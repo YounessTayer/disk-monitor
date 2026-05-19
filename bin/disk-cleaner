@@ -1,0 +1,188 @@
+#!/usr/bin/env bash
+# disk-cleaner — clean system caches, log every action, record stats to SQLite
+# Usage: disk-cleaner [trigger_name]   (default: manual)
+
+TRIGGER="${1:-manual}"
+DB_DIR="$HOME/.local/share/disk-monitor"
+DB="$DB_DIR/stats.db"
+LOG="$DB_DIR/actions.log"
+
+mkdir -p "$DB_DIR"
+
+# ── Tool detection ─────────────────────────────────────────────────────────────
+SQLITE3=$(command -v sqlite3 2>/dev/null) || {
+  echo "sqlite3 not found. Run: sudo apt install sqlite3" >&2; exit 1
+}
+PIP=$(command -v pip 2>/dev/null || command -v pip3 2>/dev/null || echo "")
+NPM=$(command -v npm 2>/dev/null \
+  || ls "$HOME/.nvm/versions/node/"*/bin/npm 2>/dev/null | sort -V | tail -1 \
+  || echo "")
+
+# ── DB init ────────────────────────────────────────────────────────────────────
+"$SQLITE3" "$DB" << 'SQL'
+CREATE TABLE IF NOT EXISTS cleanups (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts          TEXT    NOT NULL DEFAULT (datetime('now','localtime')),
+  trigger     TEXT    NOT NULL,
+  home_before INTEGER,
+  home_after  INTEGER,
+  root_before INTEGER,
+  root_after  INTEGER,
+  total_freed INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS actions (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  cleanup_id INTEGER NOT NULL REFERENCES cleanups(id),
+  name       TEXT    NOT NULL,
+  path       TEXT,
+  freed_kb   INTEGER NOT NULL DEFAULT 0,
+  status     TEXT    NOT NULL DEFAULT 'ok'
+);
+CREATE TABLE IF NOT EXISTS snapshots (
+  id        INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts        TEXT    NOT NULL DEFAULT (datetime('now','localtime')),
+  partition TEXT    NOT NULL,
+  used_kb   INTEGER NOT NULL,
+  total_kb  INTEGER NOT NULL,
+  avail_kb  INTEGER NOT NULL
+);
+SQL
+
+# ── Helpers ────────────────────────────────────────────────────────────────────
+ts()         { date '+%Y-%m-%d %H:%M:%S'; }
+log()        { echo "[$(ts)] $*" | tee -a "$LOG"; }
+dir_kb()     { [[ -d "$1" ]] && du -sk "$1" 2>/dev/null | cut -f1 || echo 0; }
+part_used()  { df --output=used  -k "$1" 2>/dev/null | tail -1; }
+part_size()  { df --output=size  -k "$1" 2>/dev/null | tail -1; }
+part_avail() { df --output=avail -k "$1" 2>/dev/null | tail -1; }
+
+kb_human() {
+  local kb=$1
+  (( kb >= 1048576 )) && { printf "%dG" $(( kb / 1048576 )); return; }
+  (( kb >= 1024    )) && { printf "%dM" $(( kb / 1024    )); return; }
+  printf "%dK" "$kb"
+}
+
+db() { "$SQLITE3" "$DB" "$1"; }
+
+snapshot() {
+  local p=$1
+  db "INSERT INTO snapshots (partition,used_kb,total_kb,avail_kb)
+      VALUES ('$p',$(part_used $p),$(part_size $p),$(part_avail $p));"
+}
+
+# ── Record cleanup start ───────────────────────────────────────────────────────
+HOME_BEFORE=$(part_used /home)
+ROOT_BEFORE=$(part_used /)
+snapshot /home
+snapshot /
+
+CLEANUP_ID=$(db "INSERT INTO cleanups (trigger,home_before,root_before)
+  VALUES ('$TRIGGER',$HOME_BEFORE,$ROOT_BEFORE);
+  SELECT last_insert_rowid();")
+TOTAL_FREED=0
+
+log "=== Cleanup #$CLEANUP_ID started  trigger=$TRIGGER ==="
+log "  /home before: $(kb_human $HOME_BEFORE)"
+log "  /     before: $(kb_human $ROOT_BEFORE)"
+
+# ── Cleaner runner ─────────────────────────────────────────────────────────────
+# run_cleaner NAME MEASURE_PATH COMMAND
+run_cleaner() {
+  local name="$1" path="$2" cmd="$3"
+
+  if [[ -n "$path" ]] && [[ ! -d "$path" ]]; then
+    db "INSERT INTO actions (cleanup_id,name,path,freed_kb,status)
+        VALUES ($CLEANUP_ID,'$name','$path',0,'skipped');"
+    log "  - $name: skipped"
+    return 0
+  fi
+
+  local before=0
+  [[ -n "$path" ]] && before=$(dir_kb "$path")
+
+  if eval "$cmd" >> "$LOG" 2>&1; then
+    local after=0
+    [[ -n "$path" ]] && after=$(dir_kb "$path")
+    local freed=$(( before - after ))
+    (( freed < 0 )) && freed=0
+    TOTAL_FREED=$(( TOTAL_FREED + freed ))
+    db "INSERT INTO actions (cleanup_id,name,path,freed_kb,status)
+        VALUES ($CLEANUP_ID,'$name','$path',$freed,'ok');"
+    log "  ✓ $name: freed $(kb_human $freed)"
+  else
+    db "INSERT INTO actions (cleanup_id,name,path,freed_kb,status)
+        VALUES ($CLEANUP_ID,'$name','$path',0,'error');"
+    log "  ✗ $name: error"
+  fi
+  return 0
+}
+
+# ── Cleaners ───────────────────────────────────────────────────────────────────
+
+# pip
+if [[ -n "$PIP" ]]; then
+  run_cleaner "pip_cache"    "$HOME/.cache/pip"  "$PIP cache purge"
+else
+  run_cleaner "pip_cache"    "$HOME/.cache/pip"  "rm -rf '$HOME/.cache/pip'"
+fi
+
+# npm
+if [[ -n "$NPM" ]]; then
+  run_cleaner "npm_cache"    "$HOME/.npm"         "$NPM cache clean --force"
+else
+  run_cleaner "npm_cache"    "$HOME/.npm"         "rm -rf '$HOME/.npm'"
+fi
+
+# Chrome — delete only Cache dirs, keep profile data
+run_cleaner "chrome_cache"   "$HOME/.cache/google-chrome" \
+  "find '$HOME/.cache/google-chrome' -mindepth 2 -maxdepth 2 -type d \
+   \( -name 'Cache' -o -name 'Code Cache' -o -name 'GPUCache' -o -name 'DawnCache' \) \
+   -exec rm -rf {} + 2>/dev/null; true"
+
+# Brave
+run_cleaner "brave_cache"    "$HOME/.cache/BraveSoftware" \
+  "find '$HOME/.cache/BraveSoftware' -mindepth 2 -maxdepth 2 -type d \
+   \( -name 'Cache' -o -name 'Code Cache' -o -name 'GPUCache' \) \
+   -exec rm -rf {} + 2>/dev/null; true"
+
+# Sublime Text
+run_cleaner "sublime_cache"  "$HOME/.cache/sublime-text" \
+  "rm -rf '$HOME/.cache/sublime-text'"
+
+# uv (Python package manager)
+run_cleaner "uv_cache"       "$HOME/.cache/uv" \
+  "rm -rf '$HOME/.cache/uv'"
+
+# Firefox/Mozilla
+run_cleaner "firefox_cache"  "$HOME/.cache/mozilla" \
+  "find '$HOME/.cache/mozilla' -type d -name 'cache2' -exec rm -rf {} + 2>/dev/null; true"
+
+# Composer (PHP)
+run_cleaner "composer_cache" "$HOME/.cache/composer" \
+  "rm -rf '$HOME/.cache/composer/files'"
+
+# Thumbnails older than 30 days
+run_cleaner "thumbnails_old" "$HOME/.cache/thumbnails" \
+  "find '$HOME/.cache/thumbnails' -type f -mtime +30 -delete 2>/dev/null; true"
+
+# ── Finalize ───────────────────────────────────────────────────────────────────
+HOME_AFTER=$(part_used /home)
+ROOT_AFTER=$(part_used /)
+snapshot /home
+snapshot /
+
+db "UPDATE cleanups
+    SET home_after=$HOME_AFTER, root_after=$ROOT_AFTER, total_freed=$TOTAL_FREED
+    WHERE id=$CLEANUP_ID;"
+
+log "=== Done. Freed: $(kb_human $TOTAL_FREED) ==="
+log "  /home after:  $(kb_human $HOME_AFTER)  (saved $(kb_human $(( HOME_BEFORE - HOME_AFTER ))))"
+log "  /     after:  $(kb_human $ROOT_AFTER)  (saved $(kb_human $(( ROOT_BEFORE - ROOT_AFTER ))))"
+
+# Desktop notification for non-manual runs
+if [[ "$TRIGGER" != "manual" ]] && command -v notify-send &>/dev/null; then
+  notify-send "Disk Cleaner" \
+    "Freed $(kb_human $TOTAL_FREED)  •  trigger: $TRIGGER" \
+    --icon=drive-harddisk --urgency=normal 2>/dev/null || true
+fi

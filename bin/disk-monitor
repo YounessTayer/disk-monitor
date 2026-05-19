@@ -1,0 +1,132 @@
+#!/usr/bin/env bash
+# disk-monitor — watches disk partitions and triggers disk-cleaner on threshold
+
+CONFIG="$HOME/.config/disk-monitor/config.sh"
+DB_DIR="$HOME/.local/share/disk-monitor"
+DB="$DB_DIR/stats.db"
+LOG="$DB_DIR/monitor.log"
+COOLDOWN_FILE="$DB_DIR/.last_clean"
+CLEANER="$HOME/.local/bin/disk-cleaner"
+
+# Defaults (overridden by config)
+WARN_THRESHOLD=80
+CLEAN_THRESHOLD=85
+CRITICAL_THRESHOLD=92
+CHECK_INTERVAL=300
+SNAPSHOT_INTERVAL=1800
+COOLDOWN=14400
+MONITOR_PARTITIONS=("/home" "/")
+
+[[ -f "$CONFIG" ]] && source "$CONFIG"
+
+SQLITE3=$(command -v sqlite3 2>/dev/null) || { echo "sqlite3 not found" >&2; exit 1; }
+mkdir -p "$DB_DIR"
+
+# ── DB init (same schema as disk-cleaner) ─────────────────────────────────────
+"$SQLITE3" "$DB" << 'SQL'
+CREATE TABLE IF NOT EXISTS cleanups (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+  trigger TEXT NOT NULL,
+  home_before INTEGER, home_after INTEGER,
+  root_before INTEGER, root_after INTEGER,
+  total_freed INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS actions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  cleanup_id INTEGER NOT NULL REFERENCES cleanups(id),
+  name TEXT NOT NULL, path TEXT,
+  freed_kb INTEGER NOT NULL DEFAULT 0,
+  status TEXT NOT NULL DEFAULT 'ok'
+);
+CREATE TABLE IF NOT EXISTS snapshots (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+  partition TEXT NOT NULL,
+  used_kb INTEGER NOT NULL,
+  total_kb INTEGER NOT NULL,
+  avail_kb INTEGER NOT NULL
+);
+SQL
+
+# ── Helpers ────────────────────────────────────────────────────────────────────
+ts()         { date '+%Y-%m-%d %H:%M:%S'; }
+log()        { echo "[$(ts)] $*" | tee -a "$LOG"; }
+part_pct()   { df --output=pcent "$1" 2>/dev/null | tail -1 | tr -d ' %'; }
+part_used()  { df --output=used  -k "$1" 2>/dev/null | tail -1; }
+part_size()  { df --output=size  -k "$1" 2>/dev/null | tail -1; }
+part_avail() { df --output=avail -k "$1" 2>/dev/null | tail -1; }
+
+snapshot_all() {
+  for p in "${MONITOR_PARTITIONS[@]}"; do
+    "$SQLITE3" "$DB" \
+      "INSERT INTO snapshots (partition,used_kb,total_kb,avail_kb)
+       VALUES ('$p',$(part_used $p),$(part_size $p),$(part_avail $p));" 2>/dev/null || true
+  done
+}
+
+can_clean() {
+  [[ ! -f "$COOLDOWN_FILE" ]] && return 0
+  local last now
+  last=$(cat "$COOLDOWN_FILE" 2>/dev/null || echo 0)
+  now=$(date +%s)
+  (( now - last >= COOLDOWN ))
+}
+
+mark_clean() { date +%s > "$COOLDOWN_FILE"; }
+
+alert() {
+  local title="$1" msg="$2" urgency="${3:-normal}"
+  command -v notify-send &>/dev/null && \
+    notify-send "$title" "$msg" --icon=drive-harddisk --urgency="$urgency" 2>/dev/null || true
+}
+
+# ── Main loop ──────────────────────────────────────────────────────────────────
+last_snapshot=$(date +%s)
+snapshot_all
+
+log "=== disk-monitor started ==="
+log "  Partitions: ${MONITOR_PARTITIONS[*]}"
+log "  Thresholds: warn=${WARN_THRESHOLD}%  clean=${CLEAN_THRESHOLD}%  critical=${CRITICAL_THRESHOLD}%"
+log "  Check every ${CHECK_INTERVAL}s  snapshot every ${SNAPSHOT_INTERVAL}s  cooldown ${COOLDOWN}s"
+
+while true; do
+  sleep "$CHECK_INTERVAL"
+  now=$(date +%s)
+
+  # Periodic disk snapshot for trend data
+  if (( now - last_snapshot >= SNAPSHOT_INTERVAL )); then
+    snapshot_all
+    last_snapshot=$now
+  fi
+
+  # Check each partition
+  for part in "${MONITOR_PARTITIONS[@]}"; do
+    pct=$(part_pct "$part" 2>/dev/null) || continue
+    [[ -z "$pct" || ! "$pct" =~ ^[0-9]+$ ]] && continue
+
+    if (( pct >= CRITICAL_THRESHOLD )); then
+      log "CRITICAL: $part at ${pct}%"
+      if can_clean; then
+        mark_clean
+        log "→ auto-clean triggered"
+        bash "$CLEANER" "critical:${part}" &
+        alert "⚠ Disk Critical" "$part is at ${pct}% — cleaning now" critical
+      else
+        log "→ cooldown active, skipping auto-clean"
+        alert "⚠ Disk Critical" "$part at ${pct}% — cooldown active, clean manually" critical
+      fi
+
+    elif (( pct >= CLEAN_THRESHOLD )); then
+      log "THRESHOLD: $part at ${pct}%"
+      if can_clean; then
+        mark_clean
+        log "→ auto-clean triggered"
+        bash "$CLEANER" "threshold:${part}" &
+      fi
+
+    elif (( pct >= WARN_THRESHOLD )); then
+      log "WARN: $part at ${pct}%"
+    fi
+  done
+done
